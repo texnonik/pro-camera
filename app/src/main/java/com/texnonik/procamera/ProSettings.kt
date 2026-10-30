@@ -16,8 +16,10 @@ data class ProSettings(
     val timer: Int = 0,
     val ratio: Int = RATIO_4_3,
     val grid: Boolean = true,
-    val jpegQuality: Int = 95,
     val front: Boolean = false,
+    /** Выбранный объектив (cameraId) для задних и передних камер; "" = основной. */
+    val backCameraId: String = "",
+    val frontCameraId: String = "",
 ) {
     val isAllAuto: Boolean
         get() = iso == 0 && shutterNs == 0L && focus < 0f && wbMode == WB_AUTO && ev == 0
@@ -37,7 +39,9 @@ data class ProSettings(
         const val FLASH_ON = 2
 
         const val RATIO_4_3 = 0
-        const val RATIO_16_9 = 1
+        /** Кадр с пропорциями экрана телефона, видоискатель на весь экран. */
+        const val RATIO_FULL = 1
+        const val JPEG_QUALITY = 95
 
         val ISO_VALUES = listOf(
             50, 64, 80, 100, 125, 160, 200, 250, 320, 400, 500, 640, 800,
@@ -53,7 +57,6 @@ data class ProSettings(
 
         val WB_NAMES = listOf("Авто", "Лампа", "Флуор.", "Солнце", "Облачно", "Кельвин")
         val TIMER_VALUES = listOf(0, 3, 10)
-        val JPEG_QUALITIES = listOf(85, 95, 100)
 
         fun shutterLabel(ns: Long): String {
             if (ns <= 0L) return "—"
@@ -84,8 +87,9 @@ class SettingsStore(context: Context) {
             timer = prefs.getInt("timer", d.timer),
             ratio = prefs.getInt("ratio", d.ratio),
             grid = prefs.getBoolean("grid", d.grid),
-            jpegQuality = prefs.getInt("jpegQuality", d.jpegQuality),
             front = prefs.getBoolean("front", d.front),
+            backCameraId = prefs.getString("backCameraId", d.backCameraId) ?: "",
+            frontCameraId = prefs.getString("frontCameraId", d.frontCameraId) ?: "",
         )
     }
 
@@ -101,8 +105,9 @@ class SettingsStore(context: Context) {
             putInt("timer", s.timer)
             putInt("ratio", s.ratio)
             putBoolean("grid", s.grid)
-            putInt("jpegQuality", s.jpegQuality)
             putBoolean("front", s.front)
+            putString("backCameraId", s.backCameraId)
+            putString("frontCameraId", s.frontCameraId)
         }
     }
 }

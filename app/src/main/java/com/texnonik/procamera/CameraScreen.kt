@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.view.MotionEvent
 import android.view.OrientationEventListener
 import android.view.Surface
+import android.view.ViewGroup
 import android.widget.Toast
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.BorderStroke
@@ -52,6 +53,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -66,6 +68,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -77,6 +80,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import coil.compose.AsyncImage
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 val Accent = Color(0xFFFFC107)
@@ -111,6 +115,7 @@ fun CameraScreen(onOpenGallery: () -> Unit) {
     var liveIso by remember { mutableIntStateOf(0) }
     var liveExposure by remember { mutableLongStateOf(0L) }
     var focusPoint by remember { mutableStateOf<Offset?>(null) }
+    var zoom by remember { mutableFloatStateOf(1f) }
 
     fun update(next: ProSettings) {
         settings = next
@@ -123,7 +128,7 @@ fun CameraScreen(onOpenGallery: () -> Unit) {
         scope.launch { lastMedia = MediaRepository.latest(context) }
     }
 
-    LaunchedEffect(settings.front, settings.ratio, settings.jpegQuality, videoMode) {
+    LaunchedEffect(settings.front, settings.ratio, settings.backCameraId, settings.frontCameraId, videoMode) {
         caps = try {
             controller.bind(lifecycleOwner, previewView, settings, videoMode)
         } catch (e: Exception) {
@@ -131,6 +136,7 @@ fun CameraScreen(onOpenGallery: () -> Unit) {
             toast("Не удалось открыть камеру: ${e.message}")
             null
         }
+        zoom = 1f
         controller.apply(settings, videoMode)
     }
 
@@ -203,120 +209,129 @@ fun CameraScreen(onOpenGallery: () -> Unit) {
     val c = caps
     val manualExposure = CameraController.isManualExposure(settings, c)
     val busy = isRecording || countdown > 0
+    val full = settings.ratio == ProSettings.RATIO_FULL
+    // Поверх видоискателя во весь экран панели полупрозрачные.
+    val barBg = if (full) Color(0x66000000) else Color.Transparent
 
-    Column(
+    val configuration = LocalConfiguration.current
+    val screenRatioLabel = remember(configuration) {
+        val w = minOf(configuration.screenWidthDp, configuration.screenHeightDp).coerceAtLeast(1)
+        val h = maxOf(configuration.screenWidthDp, configuration.screenHeightDp)
+        "${(h * 9f / w).roundToInt()}:9"
+    }
+
+    @Composable
+    fun PreviewLayer(modifier: Modifier) {
+        Box(modifier) {
+            AndroidView(
+                factory = {
+                    (previewView.parent as? ViewGroup)?.removeView(previewView)
+                    previewView.apply {
+                        setOnTouchListener { v, e ->
+                            if (e.action == MotionEvent.ACTION_UP) {
+                                if (settings.focus < 0f) {
+                                    controller.focusAt(meteringPointFactory, e.x, e.y)
+                                    focusPoint = Offset(e.x, e.y)
+                                }
+                                v.performClick()
+                            }
+                            true
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+            if (settings.grid) GridOverlay()
+            focusPoint?.let { FocusRing(it) }
+            if (capturing) Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.4f)))
+        }
+    }
+
+    Box(
         Modifier
             .fillMaxSize()
-            .background(Color.Black)
-            .systemBarsPadding(),
+            .background(Color.Black),
     ) {
-        // Верхняя панель
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            TopIcon(
-                icon = when (settings.flash) {
-                    ProSettings.FLASH_AUTO -> Icons.Filled.FlashAuto
-                    ProSettings.FLASH_ON -> Icons.Filled.FlashOn
-                    else -> Icons.Filled.FlashOff
-                },
-                description = "Вспышка",
-                enabled = c?.hasFlash == true,
-                active = settings.flash != ProSettings.FLASH_OFF,
-            ) {
-                val modes = if (videoMode) listOf(ProSettings.FLASH_OFF, ProSettings.FLASH_ON)
-                else listOf(ProSettings.FLASH_OFF, ProSettings.FLASH_AUTO, ProSettings.FLASH_ON)
-                val idx = modes.indexOf(settings.flash)
-                update(settings.copy(flash = modes[(idx + 1) % modes.size]))
-            }
-            TopIcon(
-                icon = when (settings.timer) {
-                    3 -> Icons.Filled.Timer3
-                    10 -> Icons.Filled.Timer10
-                    0 -> Icons.Filled.TimerOff
-                    else -> Icons.Filled.Timer
-                },
-                description = "Таймер",
-                enabled = !videoMode && !busy,
-                active = settings.timer > 0,
-            ) {
-                val values = ProSettings.TIMER_VALUES
-                update(settings.copy(timer = values[(values.indexOf(settings.timer) + 1) % values.size]))
-            }
-            TopText(
-                text = if (settings.ratio == ProSettings.RATIO_16_9) "16:9" else "4:3",
-                enabled = !busy,
-            ) {
-                update(settings.copy(ratio = 1 - settings.ratio.coerceIn(0, 1)))
-            }
-            TopIcon(
-                icon = if (settings.grid) Icons.Filled.GridOn else Icons.Filled.GridOff,
-                description = "Сетка",
-                enabled = true,
-                active = settings.grid,
-            ) { update(settings.copy(grid = !settings.grid)) }
-            TopText(text = "JPEG ${settings.jpegQuality}", enabled = !videoMode && !busy) {
-                val q = ProSettings.JPEG_QUALITIES
-                update(settings.copy(jpegQuality = q[(q.indexOf(settings.jpegQuality) + 1) % q.size]))
-            }
-            AutoButton(allAuto = settings.isAllAuto) {
-                update(settings.resetToAuto())
-                panel = null
-            }
-        }
+        if (full) PreviewLayer(Modifier.fillMaxSize())
 
-        // Видоискатель
-        Box(
+        Column(
             Modifier
-                .fillMaxWidth()
-                .weight(1f),
-            contentAlignment = Alignment.Center,
+                .fillMaxSize()
+                .systemBarsPadding(),
         ) {
-            Box(Modifier.aspectRatio(if (settings.ratio == ProSettings.RATIO_16_9) 9f / 16f else 3f / 4f)) {
-                AndroidView(
-                    factory = {
-                        previewView.apply {
-                            setOnTouchListener { v, e ->
-                                if (e.action == MotionEvent.ACTION_UP) {
-                                    if (settings.focus < 0f) {
-                                        controller.focusAt(meteringPointFactory, e.x, e.y)
-                                        focusPoint = Offset(e.x, e.y)
-                                    }
-                                    v.performClick()
-                                }
-                                true
-                            }
-                        }
+            // Верхняя панель
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .background(barBg)
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                TopIcon(
+                    icon = when (settings.flash) {
+                        ProSettings.FLASH_AUTO -> Icons.Filled.FlashAuto
+                        ProSettings.FLASH_ON -> Icons.Filled.FlashOn
+                        else -> Icons.Filled.FlashOff
                     },
-                    modifier = Modifier.fillMaxSize(),
-                )
-                if (settings.grid) GridOverlay()
-                focusPoint?.let { FocusRing(it) }
-                if (capturing) Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.4f)))
+                    description = "Вспышка",
+                    enabled = c?.hasFlash == true,
+                    active = settings.flash != ProSettings.FLASH_OFF,
+                ) {
+                    val modes = if (videoMode) listOf(ProSettings.FLASH_OFF, ProSettings.FLASH_ON)
+                    else listOf(ProSettings.FLASH_OFF, ProSettings.FLASH_AUTO, ProSettings.FLASH_ON)
+                    val idx = modes.indexOf(settings.flash)
+                    update(settings.copy(flash = modes[(idx + 1) % modes.size]))
+                }
+                TopIcon(
+                    icon = when (settings.timer) {
+                        3 -> Icons.Filled.Timer3
+                        10 -> Icons.Filled.Timer10
+                        0 -> Icons.Filled.TimerOff
+                        else -> Icons.Filled.Timer
+                    },
+                    description = "Таймер",
+                    enabled = !videoMode && !busy,
+                    active = settings.timer > 0,
+                ) {
+                    val values = ProSettings.TIMER_VALUES
+                    update(settings.copy(timer = values[(values.indexOf(settings.timer) + 1) % values.size]))
+                }
+                TopText(text = if (full) screenRatioLabel else "4:3", enabled = !busy) {
+                    update(
+                        settings.copy(
+                            ratio = if (full) ProSettings.RATIO_4_3 else ProSettings.RATIO_FULL,
+                        ),
+                    )
+                }
+                TopIcon(
+                    icon = if (settings.grid) Icons.Filled.GridOn else Icons.Filled.GridOff,
+                    description = "Сетка",
+                    enabled = true,
+                    active = settings.grid,
+                ) { update(settings.copy(grid = !settings.grid)) }
+                AutoButton(allAuto = settings.isAllAuto) {
+                    update(settings.resetToAuto())
+                    panel = null
+                }
+            }
+
+            // Видоискатель (в режиме «весь экран» он лежит под всеми панелями)
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (!full) PreviewLayer(Modifier.aspectRatio(3f / 4f))
                 if (countdown > 0) {
                     Text(
                         "$countdown",
                         color = Color.White,
                         fontSize = 96.sp,
                         fontWeight = FontWeight.Bold,
-                        modifier = Modifier.align(Alignment.Center),
                     )
                 }
-                Text(
-                    if (videoMode) "ВИДЕО" else "PRO ФОТО",
-                    color = Accent,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .padding(8.dp)
-                        .background(PanelBg, RoundedCornerShape(6.dp))
-                        .padding(horizontal = 8.dp, vertical = 3.dp),
-                )
                 if (isRecording) {
                     val total = recordNanos / 1_000_000_000L
                     Text(
@@ -330,122 +345,208 @@ fun CameraScreen(onOpenGallery: () -> Unit) {
                             .padding(horizontal = 10.dp, vertical = 4.dp),
                     )
                 }
+                if (c != null) {
+                    LensRow(
+                        caps = c,
+                        zoom = zoom,
+                        enabled = !busy,
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 8.dp),
+                        onLens = { id ->
+                            update(
+                                if (settings.front) settings.copy(frontCameraId = id)
+                                else settings.copy(backCameraId = id),
+                            )
+                        },
+                        onZoom = {
+                            zoom = it
+                            controller.setZoom(it)
+                        },
+                    )
+                }
             }
-        }
 
-        // Ручные параметры
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 4.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly,
-        ) {
-            ProChip(
-                "ISO",
-                if (settings.iso > 0 && c?.manualSensor == true) "${settings.iso}"
-                else if (liveIso > 0) "A $liveIso" else "Авто",
-                selected = panel == Panel.ISO,
-                manual = settings.iso > 0,
-            ) { panel = if (panel == Panel.ISO) null else Panel.ISO }
-            ProChip(
-                "ВЫДЕРЖКА",
-                if (settings.shutterNs > 0 && c?.manualSensor == true) ProSettings.shutterLabel(settings.shutterNs)
-                else if (liveExposure > 0) "A " + ProSettings.shutterLabel(liveExposure) else "Авто",
-                selected = panel == Panel.SHUTTER,
-                manual = settings.shutterNs > 0,
-            ) { panel = if (panel == Panel.SHUTTER) null else Panel.SHUTTER }
-            ProChip(
-                "ФОКУС",
-                focusLabel(settings.focus, c?.minFocus ?: 0f),
-                selected = panel == Panel.FOCUS,
-                manual = settings.focus >= 0f,
-            ) { panel = if (panel == Panel.FOCUS) null else Panel.FOCUS }
-            ProChip(
-                "ББ",
-                if (settings.wbMode == ProSettings.WB_KELVIN) "${settings.kelvin}K"
-                else ProSettings.WB_NAMES[settings.wbMode.coerceIn(0, ProSettings.WB_NAMES.lastIndex)],
-                selected = panel == Panel.WB,
-                manual = settings.wbMode != ProSettings.WB_AUTO,
-            ) { panel = if (panel == Panel.WB) null else Panel.WB }
-            ProChip(
-                "EV",
-                "%+.1f".format(settings.ev * (c?.evStep ?: 0f)),
-                selected = panel == Panel.EV,
-                manual = settings.ev != 0,
-            ) { panel = if (panel == Panel.EV) null else Panel.EV }
-        }
+            Column(Modifier.fillMaxWidth().background(barBg)) {
+                // Ручные параметры
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 4.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                ) {
+                    ProChip(
+                        "ISO",
+                        if (settings.iso > 0 && c?.manualSensor == true) "${settings.iso}"
+                        else if (liveIso > 0) "A $liveIso" else "Авто",
+                        selected = panel == Panel.ISO,
+                        manual = settings.iso > 0,
+                    ) { panel = if (panel == Panel.ISO) null else Panel.ISO }
+                    ProChip(
+                        "ВЫДЕРЖКА",
+                        if (settings.shutterNs > 0 && c?.manualSensor == true) ProSettings.shutterLabel(settings.shutterNs)
+                        else if (liveExposure > 0) "A " + ProSettings.shutterLabel(liveExposure) else "Авто",
+                        selected = panel == Panel.SHUTTER,
+                        manual = settings.shutterNs > 0,
+                    ) { panel = if (panel == Panel.SHUTTER) null else Panel.SHUTTER }
+                    ProChip(
+                        "ФОКУС",
+                        focusLabel(settings.focus, c?.minFocus ?: 0f),
+                        selected = panel == Panel.FOCUS,
+                        manual = settings.focus >= 0f,
+                    ) { panel = if (panel == Panel.FOCUS) null else Panel.FOCUS }
+                    ProChip(
+                        "ББ",
+                        if (settings.wbMode == ProSettings.WB_KELVIN) "${settings.kelvin}K"
+                        else ProSettings.WB_NAMES[settings.wbMode.coerceIn(0, ProSettings.WB_NAMES.lastIndex)],
+                        selected = panel == Panel.WB,
+                        manual = settings.wbMode != ProSettings.WB_AUTO,
+                    ) { panel = if (panel == Panel.WB) null else Panel.WB }
+                    ProChip(
+                        "EV",
+                        "%+.1f".format(settings.ev * (c?.evStep ?: 0f)),
+                        selected = panel == Panel.EV,
+                        manual = settings.ev != 0,
+                    ) { panel = if (panel == Panel.EV) null else Panel.EV }
+                }
 
-        panel?.let { p ->
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 56.dp)
-                    .padding(horizontal = 8.dp)
-                    .background(PanelBg, RoundedCornerShape(12.dp))
-                    .padding(8.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                PanelContent(p, settings, c, manualExposure) { update(it) }
-            }
-        }
-
-        // Переключатель фото / видео
-        Box(Modifier.fillMaxWidth().padding(top = 10.dp), contentAlignment = Alignment.Center) {
-            Row(
-                Modifier
-                    .clip(RoundedCornerShape(50))
-                    .background(Color(0xFF222222))
-                    .clickable(enabled = !busy && !capturing) {
-                        panel = null
-                        videoMode = !videoMode
-                        if (videoMode && settings.flash == ProSettings.FLASH_AUTO) {
-                            update(settings.copy(flash = ProSettings.FLASH_OFF))
-                        }
+                panel?.let { p ->
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 56.dp)
+                            .padding(horizontal = 8.dp)
+                            .background(PanelBg, RoundedCornerShape(12.dp))
+                            .padding(8.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        PanelContent(p, settings, c, manualExposure) { update(it) }
                     }
-                    .padding(horizontal = 18.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(
-                    if (videoMode) Icons.Filled.PhotoCamera else Icons.Filled.Videocam,
-                    contentDescription = null,
-                    tint = if (busy) Color.Gray else Color.White,
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    if (videoMode) "Фото" else "Видео",
-                    color = if (busy) Color.Gray else Color.White,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
-        }
+                }
 
-        // Нижняя панель
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .padding(vertical = 16.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            GalleryThumb(lastMedia, enabled = !busy) { onOpenGallery() }
-            ShutterButton(videoMode = videoMode, recording = isRecording) { onShutter() }
-            Box(
-                Modifier
-                    .size(56.dp)
-                    .clip(CircleShape)
-                    .background(Color(0xFF222222))
-                    .clickable(enabled = c?.hasFront == true && !busy) {
-                        update(settings.copy(front = !settings.front))
-                    },
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    Icons.Filled.Cameraswitch,
-                    contentDescription = "Сменить камеру",
-                    tint = if (c?.hasFront == true && !busy) Color.White else Color.Gray,
-                )
+                // Переключатель фото / видео
+                Box(Modifier.fillMaxWidth().padding(top = 10.dp), contentAlignment = Alignment.Center) {
+                    Row(
+                        Modifier
+                            .clip(RoundedCornerShape(50))
+                            .background(Color(0xFF222222))
+                            .clickable(enabled = !busy && !capturing) {
+                                panel = null
+                                videoMode = !videoMode
+                                if (videoMode && settings.flash == ProSettings.FLASH_AUTO) {
+                                    update(settings.copy(flash = ProSettings.FLASH_OFF))
+                                }
+                            }
+                            .padding(horizontal = 18.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            if (videoMode) Icons.Filled.PhotoCamera else Icons.Filled.Videocam,
+                            contentDescription = null,
+                            tint = if (busy) Color.Gray else Color.White,
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            if (videoMode) "Фото" else "Видео",
+                            color = if (busy) Color.Gray else Color.White,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                }
+
+                // Нижняя панель
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 16.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    GalleryThumb(lastMedia, enabled = !busy) { onOpenGallery() }
+                    ShutterButton(videoMode = videoMode, recording = isRecording) { onShutter() }
+                    Box(
+                        Modifier
+                            .size(56.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF222222))
+                            .clickable(enabled = c?.hasFront == true && !busy) {
+                                update(settings.copy(front = !settings.front))
+                            },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            Icons.Filled.Cameraswitch,
+                            contentDescription = "Сменить камеру",
+                            tint = if (c?.hasFront == true && !busy) Color.White else Color.Gray,
+                        )
+                    }
+                }
             }
         }
+    }
+}
+
+/**
+ * Выбор объектива: отдельные камеры телефона (0.6x / 1x / 2x…), а если телефон
+ * отдаёт одну логическую камеру — шаги зума этой камеры.
+ */
+@Composable
+private fun LensRow(
+    caps: CameraCaps,
+    zoom: Float,
+    enabled: Boolean,
+    modifier: Modifier,
+    onLens: (String) -> Unit,
+    onZoom: (Float) -> Unit,
+) {
+    val lensChoices = caps.lenses.size > 1
+    val zoomSteps = buildList {
+        if (caps.minZoom < 0.95f) add(caps.minZoom)
+        add(1f)
+        if (caps.maxZoom >= 2f) add(2f)
+        if (caps.maxZoom >= 5f) add(5f)
+    }
+    if (!lensChoices && zoomSteps.size < 2) return
+
+    Row(
+        modifier
+            .clip(RoundedCornerShape(50))
+            .background(Color(0x99000000))
+            .padding(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        if (lensChoices) {
+            caps.lenses.forEach { lens ->
+                LensChip(lens.label, selected = lens.cameraId == caps.cameraId, enabled = enabled) {
+                    onLens(lens.cameraId)
+                }
+            }
+        } else {
+            zoomSteps.forEach { z ->
+                LensChip(LensOption("", z).label, selected = abs(zoom - z) < 0.05f, enabled = enabled) {
+                    onZoom(z)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LensChip(text: String, selected: Boolean, enabled: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .size(40.dp)
+            .clip(CircleShape)
+            .background(if (selected) Color(0xFF333333) else Color.Transparent)
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text,
+            color = if (selected) Accent else Color.White,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+        )
     }
 }
 
@@ -616,7 +717,7 @@ private fun ProChip(label: String, value: String, selected: Boolean, manual: Boo
             .padding(horizontal = 8.dp, vertical = 4.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text(label, color = Color.Gray, fontSize = 10.sp)
+        Text(label, color = Color.LightGray, fontSize = 10.sp)
         Text(
             value,
             color = if (manual) Accent else Color.White,

@@ -30,11 +30,11 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -43,6 +43,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.decode.VideoFrameDecoder
@@ -87,8 +90,23 @@ private fun isGranted(context: Context, permission: String) =
 @Composable
 private fun AppRoot() {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     var hasCamera by remember { mutableStateOf(isGranted(context, Manifest.permission.CAMERA)) }
-    var showGallery by rememberSaveable { mutableStateOf(false) }
+    var showGallery by remember { mutableStateOf(false) }
+    // true, пока открыт внешний просмотрщик фото/видео из нашей галереи.
+    var viewerOpen by remember { mutableStateOf(false) }
+
+    // При каждом возврате в приложение — сразу камера (кроме возврата из просмотрщика).
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_START) {
+                if (!viewerOpen) showGallery = false
+                viewerOpen = false
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         hasCamera = isGranted(context, Manifest.permission.CAMERA)
     }
@@ -113,7 +131,10 @@ private fun AppRoot() {
                     )
                 },
             )
-            showGallery -> GalleryScreen(onBack = { showGallery = false })
+            showGallery -> GalleryScreen(
+                onBack = { showGallery = false },
+                onOpenViewer = { viewerOpen = true },
+            )
             else -> CameraScreen(onOpenGallery = { showGallery = true })
         }
     }

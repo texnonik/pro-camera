@@ -46,7 +46,7 @@ import coil.compose.AsyncImage
 
 /** Фото и видео из DCIM/Camera — та же папка, что у стандартной камеры. */
 @Composable
-fun GalleryScreen(onBack: () -> Unit) {
+fun GalleryScreen(onBack: () -> Unit, onOpenViewer: () -> Unit) {
     val context = LocalContext.current
     var media by remember { mutableStateOf<List<MediaItem>?>(null) }
     LaunchedEffect(Unit) { media = MediaRepository.load(context) }
@@ -89,7 +89,10 @@ fun GalleryScreen(onBack: () -> Unit) {
                 modifier = Modifier.fillMaxSize(),
             ) {
                 items(list, key = { it.uri.toString() }) { item ->
-                    GalleryCell(item) { openMedia(context, item) }
+                    GalleryCell(item) {
+                        onOpenViewer()
+                        openMedia(context, item)
+                    }
                 }
             }
         }
