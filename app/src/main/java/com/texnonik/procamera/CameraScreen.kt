@@ -322,7 +322,7 @@ fun CameraScreen(onOpenGallery: () -> Unit) {
                 TopText(
                     text = ProSettings.RATIO_LABELS[settings.ratio.coerceIn(0, ProSettings.RATIO_LABELS.lastIndex)],
                     enabled = !busy,
-                    onHold = { pixelInfo = controller.outputPixels() },
+                    onHold = { pixelInfo = controller.outputPixels(settings.ratio) },
                     onRelease = { pixelInfo = null },
                 ) {
                     update(settings.copy(ratio = (settings.ratio + 1) % ProSettings.RATIO_LABELS.size))

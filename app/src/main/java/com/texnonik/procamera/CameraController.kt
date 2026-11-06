@@ -269,10 +269,28 @@ class CameraController(private val context: Context) {
     }
 
     /** Размер снимка или видео в текущем формате кадра. */
-    fun outputPixels(): String? {
-        val crop = (imageCapture?.resolutionInfo ?: videoCapture?.resolutionInfo)?.cropRect ?: return null
-        val megapixels = crop.width() * crop.height() / 1_000_000f
-        return "${maxOf(crop.width(), crop.height())} × ${minOf(crop.width(), crop.height())} · %.1f МП".format(megapixels)
+    fun outputPixels(ratio: Int): String? {
+        val crop = imageCapture?.resolutionInfo?.cropRect
+        val (first, second) = if (crop != null) {
+            crop.width() to crop.height()
+        } else {
+            videoPixels(ratio) ?: return null
+        }
+        val long = maxOf(first, second)
+        val short = minOf(first, second)
+        return "$long × $short · %.1f МП".format(long * short / 1_000_000f)
+    }
+
+    /** CameraX 1.3 не отдаёт размер видео: берём размер качества и обрезаем под формат кадра. */
+    private fun videoPixels(ratio: Int): Pair<Int, Int>? {
+        val info = camera?.cameraInfo ?: return null
+        val size = listOf(Quality.FHD, Quality.HD, Quality.SD)
+            .firstNotNullOfOrNull { QualitySelector.getResolution(info, it) } ?: return null
+        val (ratioW, ratioH) = ProSettings.ratioSize(ratio)
+        val long = maxOf(size.width, size.height)
+        val short = minOf(size.width, size.height)
+        val target = ratioH.toFloat() / ratioW
+        return if (long.toFloat() / short > target) (short * target).roundToInt() to short else long to (long / target).roundToInt()
     }
 
     fun setZoom(ratio: Float) {
