@@ -88,7 +88,12 @@ data class CameraCaps(
  * Отдельная камера телефона; [factor] — увеличение относительно основной (0.6x, 1x, 2x…).
  * [physicalId] задан, если объектив входит в логическую камеру [cameraId].
  */
-data class LensOption(val cameraId: String, val factor: Float, val physicalId: String? = null) {
+data class LensOption(
+    val cameraId: String,
+    val factor: Float,
+    val physicalId: String? = null,
+    val title: String = "",
+) {
     val id: String
         get() = if (physicalId != null) "$cameraId/$physicalId" else cameraId
 
@@ -244,26 +249,59 @@ class CameraController(private val context: Context) {
     private fun lensesFor(p: ProcessCameraProvider, front: Boolean): List<LensOption> {
         val manager = context.getSystemService(CameraManager::class.java)
         val facing = if (front) CameraCharacteristics.LENS_FACING_FRONT else CameraCharacteristics.LENS_FACING_BACK
-        val found = mutableListOf<LensOption>()
+        val found = mutableListOf<Pair<LensOption, Int>>()
         p.availableCameraInfos.forEach { info ->
             val id = Camera2CameraInfo.from(info).cameraId
             val chars = manager.getCameraCharacteristics(id)
             if (chars.get(CameraCharacteristics.LENS_FACING) != facing) return@forEach
-            equivalentFocal(chars)?.let { found += LensOption(id, it) }
+            equivalentFocal(chars)?.let { found += LensOption(id, it) to sensorKey(chars) }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 chars.physicalCameraIds.forEach { physicalId ->
-                    runCatching { equivalentFocal(manager.getCameraCharacteristics(physicalId)) }
-                        .getOrNull()
-                        ?.let { found += LensOption(id, it, physicalId) }
+                    val physical = runCatching { manager.getCameraCharacteristics(physicalId) }.getOrNull()
+                        ?: return@forEach
+                    equivalentFocal(physical)?.let { found += LensOption(id, it, physicalId) to sensorKey(physical) }
                 }
             }
         }
         if (found.isEmpty()) return emptyList()
-        val main = found.first().factor
+        val main = found.first().first.factor
+        val used = mutableMapOf<String, Int>()
+        // Один объектив может быть виден и отдельно, и внутри логической камеры. Камеры с тем же
+        // фокусным, но другим сенсором (например, макро) остаются отдельными.
         return found
-            .map { it.copy(factor = it.factor / main) }
-            .distinctBy { (it.factor * 10).roundToInt() }
+            .map { (lens, sensor) -> lens.copy(factor = lens.factor / main) to sensor }
+            .distinctBy { (lens, sensor) -> (lens.factor * 10).roundToInt() to sensor }
+            .map { it.first }
             .sortedBy { it.factor }
+            .map { lens ->
+                val base = when {
+                    lens.factor < 0.8f -> "Шир."
+                    lens.factor <= 1.3f -> "Осн."
+                    else -> "Теле"
+                }
+                val number = (used[base] ?: 0) + 1
+                used[base] = number
+                lens.copy(title = if (number > 1) "$base $number" else base)
+            }
+    }
+
+    private fun sensorKey(chars: CameraCharacteristics): Int =
+        chars.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+            ?.let { (hypot(it.width, it.height) * 2).roundToInt() } ?: 0
+
+    /** Что телефон сообщает о задних камерах: открытые приложениям и скрытые номера. */
+    fun rearCameraReport(): String {
+        val manager = context.getSystemService(CameraManager::class.java)
+        val isRear = { id: String ->
+            runCatching {
+                manager.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING) ==
+                    CameraCharacteristics.LENS_FACING_BACK
+            }.getOrDefault(false)
+        }
+        val listed = manager.cameraIdList.toList()
+        val open = listed.filter(isRear)
+        val hidden = (0..31).map { it.toString() }.filter { it !in listed && isRear(it) }
+        return "Открыты задние: ${open.joinToString()}. Скрытые: ${hidden.joinToString().ifEmpty { "нет" }}"
     }
 
     /** Эквивалентное фокусное расстояние (35 мм), чтобы сравнивать разные сенсоры. */
