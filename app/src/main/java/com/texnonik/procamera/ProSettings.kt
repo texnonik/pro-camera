@@ -15,7 +15,6 @@ data class ProSettings(
     val flash: Int = FLASH_OFF,
     val timer: Int = 0,
     val ratio: Int = RATIO_4_3,
-    val grid: Boolean = true,
     val front: Boolean = false,
     /** Выбранный объектив (cameraId) для задних и передних камер; "" = основной. */
     val backCameraId: String = "",
@@ -96,7 +95,6 @@ class SettingsStore(context: Context) {
             flash = prefs.getInt("flash", d.flash),
             timer = prefs.getInt("timer", d.timer),
             ratio = prefs.getInt("ratio", d.ratio),
-            grid = prefs.getBoolean("grid", d.grid),
             front = prefs.getBoolean("front", d.front),
             backCameraId = prefs.getString("backCameraId", d.backCameraId) ?: "",
             frontCameraId = prefs.getString("frontCameraId", d.frontCameraId) ?: "",
@@ -114,7 +112,6 @@ class SettingsStore(context: Context) {
             putInt("flash", s.flash)
             putInt("timer", s.timer)
             putInt("ratio", s.ratio)
-            putBoolean("grid", s.grid)
             putBoolean("front", s.front)
             putString("backCameraId", s.backCameraId)
             putString("frontCameraId", s.frontCameraId)

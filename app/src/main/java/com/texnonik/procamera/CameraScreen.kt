@@ -1,6 +1,9 @@
 package com.texnonik.procamera
 
 import android.annotation.SuppressLint
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.net.Uri
 import android.view.MotionEvent
 import android.view.OrientationEventListener
 import android.view.Surface
@@ -36,8 +39,7 @@ import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.FlashAuto
 import androidx.compose.material.icons.filled.FlashOff
 import androidx.compose.material.icons.filled.FlashOn
-import androidx.compose.material.icons.filled.GridOff
-import androidx.compose.material.icons.filled.GridOn
+import androidx.compose.material.icons.filled.FlipCameraAndroid
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Timer
@@ -45,11 +47,15 @@ import androidx.compose.material.icons.filled.Timer10
 import androidx.compose.material.icons.filled.Timer3
 import androidx.compose.material.icons.filled.TimerOff
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -120,7 +126,10 @@ fun CameraScreen(onOpenGallery: () -> Unit) {
     var zoom by remember { mutableFloatStateOf(1f) }
     // Спуск удерживается: снимок или видео идут на автонастройках, ручные значения не меняются.
     var autoOverride by remember { mutableStateOf(false) }
-    var pixelInfo by remember { mutableStateOf<String?>(null) }
+    var ratioMenuOpen by remember { mutableStateOf(false) }
+    var shutterHeld by remember { mutableStateOf(false) }
+    var checkingUpdates by remember { mutableStateOf(false) }
+    var newerBuild by remember { mutableStateOf<Int?>(null) }
 
     fun update(next: ProSettings) {
         settings = next
@@ -221,11 +230,30 @@ fun CameraScreen(onOpenGallery: () -> Unit) {
         }
     }
 
+    fun checkForUpdates() {
+        if (checkingUpdates) return
+        checkingUpdates = true
+        scope.launch {
+            try {
+                newerBuild = UpdateChecker.findNewerBuild(context)
+                if (newerBuild == null) toast("Установлена последняя версия")
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                toast("Не удалось проверить обновления")
+            } finally {
+                checkingUpdates = false
+            }
+        }
+    }
+
     fun onShutterHold() {
+        shutterHeld = true
         if (!isRecording && countdown == 0 && !capturing) autoOverride = true
+        checkForUpdates()
     }
 
     fun onShutterRelease(released: Boolean) {
+        shutterHeld = false
         if (released) onShutter() else if (!isRecording) autoOverride = false
     }
 
@@ -237,6 +265,23 @@ fun CameraScreen(onOpenGallery: () -> Unit) {
     val barBg = if (tall) Color(0x66000000) else Color.Transparent
     val (ratioW, ratioH) = ProSettings.ratioSize(settings.ratio)
     val previewAspect = ratioW.toFloat() / ratioH
+
+    /** Следующая камера: объективы текущей стороны, затем другая сторона телефона. */
+    fun nextCamera() {
+        val current = c ?: return
+        val next = current.lenses.getOrNull(current.lenses.indexOfFirst { it.id == current.cameraId } + 1)
+        val other = current.otherLenses.firstOrNull()
+        update(
+            when {
+                next != null && settings.front -> settings.copy(frontCameraId = next.id)
+                next != null -> settings.copy(backCameraId = next.id)
+                other != null && settings.front -> settings.copy(front = false, backCameraId = other.id)
+                other != null -> settings.copy(front = true, frontCameraId = other.id)
+                settings.front -> settings.copy(frontCameraId = current.lenses.firstOrNull()?.id ?: "")
+                else -> settings.copy(backCameraId = current.lenses.firstOrNull()?.id ?: "")
+            },
+        )
+    }
 
     @Composable
     fun PreviewLayer(modifier: Modifier) {
@@ -259,10 +304,26 @@ fun CameraScreen(onOpenGallery: () -> Unit) {
                 },
                 modifier = Modifier.fillMaxSize(),
             )
-            if (settings.grid) GridOverlay()
             focusPoint?.let { FocusRing(it) }
             if (capturing) Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.4f)))
         }
+    }
+
+    // Диалог ждёт отпускания спуска и конца записи, чтобы не прервать съёмку.
+    val availableBuild = newerBuild
+    if (availableBuild != null && !shutterHeld && !isRecording) {
+        UpdateDialog(
+            build = availableBuild,
+            onDownload = {
+                newerBuild = null
+                try {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(UpdateChecker.DOWNLOAD_URL)))
+                } catch (e: ActivityNotFoundException) {
+                    toast("Нет браузера для загрузки")
+                }
+            },
+            onDismiss = { newerBuild = null },
+        )
     }
 
     Box(
@@ -319,20 +380,38 @@ fun CameraScreen(onOpenGallery: () -> Unit) {
                     val values = ProSettings.TIMER_VALUES
                     update(settings.copy(timer = values[(values.indexOf(settings.timer) + 1) % values.size]))
                 }
-                TopText(
-                    text = ProSettings.RATIO_LABELS[settings.ratio.coerceIn(0, ProSettings.RATIO_LABELS.lastIndex)],
-                    enabled = !busy,
-                    onHold = { pixelInfo = controller.outputPixels(settings.ratio) },
-                    onRelease = { pixelInfo = null },
-                ) {
-                    update(settings.copy(ratio = (settings.ratio + 1) % ProSettings.RATIO_LABELS.size))
+                Box {
+                    TopText(
+                        text = ProSettings.RATIO_LABELS[settings.ratio.coerceIn(0, ProSettings.RATIO_LABELS.lastIndex)],
+                        enabled = !busy,
+                        onHold = { ratioMenuOpen = true },
+                    ) {
+                        update(settings.copy(ratio = (settings.ratio + 1) % ProSettings.RATIO_LABELS.size))
+                    }
+                    DropdownMenu(expanded = ratioMenuOpen, onDismissRequest = { ratioMenuOpen = false }) {
+                        ProSettings.RATIO_LABELS.forEachIndexed { index, label ->
+                            val pixels = controller.outputPixels(index)
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        if (pixels != null) "$label  ·  $pixels" else label,
+                                        color = if (index == settings.ratio) Accent else Color.White,
+                                    )
+                                },
+                                onClick = {
+                                    ratioMenuOpen = false
+                                    update(settings.copy(ratio = index))
+                                },
+                            )
+                        }
+                    }
                 }
                 TopIcon(
-                    icon = if (settings.grid) Icons.Filled.GridOn else Icons.Filled.GridOff,
-                    description = "Сетка",
-                    enabled = true,
-                    active = settings.grid,
-                ) { update(settings.copy(grid = !settings.grid)) }
+                    icon = Icons.Filled.FlipCameraAndroid,
+                    description = "Следующая камера",
+                    enabled = c != null && !busy,
+                    active = false,
+                ) { nextCamera() }
                 AutoButton(allAuto = settings.isAllAuto) {
                     update(settings.resetToAuto())
                     panel = null
@@ -347,16 +426,6 @@ fun CameraScreen(onOpenGallery: () -> Unit) {
                 contentAlignment = Alignment.Center,
             ) {
                 if (!tall) PreviewLayer(Modifier.aspectRatio(previewAspect))
-                pixelInfo?.let {
-                    Text(
-                        it,
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier
-                            .background(PanelBg, RoundedCornerShape(8.dp))
-                            .padding(horizontal = 12.dp, vertical = 6.dp),
-                    )
-                }
                 if (countdown > 0) {
                     Text(
                         "$countdown",
@@ -522,6 +591,17 @@ fun CameraScreen(onOpenGallery: () -> Unit) {
             }
         }
     }
+}
+
+@Composable
+private fun UpdateDialog(build: Int, onDownload: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Доступна новая версия") },
+        text = { Text("Сборка $build готова к загрузке.") },
+        confirmButton = { TextButton(onClick = onDownload) { Text("Скачать") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Позже") } },
+    )
 }
 
 /**
@@ -823,7 +903,6 @@ private fun TopText(
     text: String,
     enabled: Boolean,
     onHold: () -> Unit,
-    onRelease: () -> Unit,
     onClick: () -> Unit,
 ) {
     Text(
@@ -833,7 +912,7 @@ private fun TopText(
         fontWeight = FontWeight.SemiBold,
         modifier = Modifier
             .clip(RoundedCornerShape(8.dp))
-            .tapOrHold(enabled, onHold, { onRelease() }, onClick)
+            .tapOrHold(enabled, onHold, {}, onClick)
             .padding(horizontal = 6.dp, vertical = 8.dp),
     )
 }
@@ -910,20 +989,6 @@ private fun GalleryThumb(item: MediaItem?, enabled: Boolean, onClick: () -> Unit
             )
         } else {
             Icon(Icons.Filled.PhotoLibrary, contentDescription = "Галерея", tint = Color.White)
-        }
-    }
-}
-
-@Composable
-private fun GridOverlay() {
-    Canvas(Modifier.fillMaxSize()) {
-        val color = Color.White.copy(alpha = 0.35f)
-        val stroke = 1.dp.toPx()
-        for (i in 1..2) {
-            val x = size.width * i / 3f
-            val y = size.height * i / 3f
-            drawLine(color, Offset(x, 0f), Offset(x, size.height), stroke)
-            drawLine(color, Offset(0f, y), Offset(size.width, y), stroke)
         }
     }
 }

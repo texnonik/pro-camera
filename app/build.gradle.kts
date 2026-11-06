@@ -12,8 +12,9 @@ android {
         applicationId = "com.texnonik.procamera"
         minSdk = 26
         targetSdk = 34
-        versionCode = 3
-        versionName = "1.2"
+        // Совпадает с номером сборки в теге релиза build-N: по нему приложение ищет обновления.
+        versionCode = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
+        versionName = "1.3"
     }
 
     // Постоянный debug-ключ (создаётся в CI при первой сборке), чтобы APK обновлялся поверх старого.

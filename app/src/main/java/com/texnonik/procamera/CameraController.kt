@@ -4,6 +4,7 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
+import android.graphics.ImageFormat
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
@@ -21,6 +22,7 @@ import android.provider.MediaStore
 import android.util.Log
 import android.util.Range
 import android.util.Rational
+import android.util.Size
 import android.view.Surface
 import androidx.annotation.OptIn
 import androidx.camera.camera2.interop.Camera2CameraControl
@@ -57,6 +59,7 @@ import androidx.lifecycle.LifecycleOwner
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
+import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.ln
 import kotlin.math.pow
@@ -76,6 +79,8 @@ data class CameraCaps(
     val hasFront: Boolean,
     /** Объективы с той же стороны, что и текущая камера (если телефон их открывает). */
     val lenses: List<LensOption>,
+    /** Объективы на другой стороне телефона. */
+    val otherLenses: List<LensOption>,
     val cameraId: String,
     val minZoom: Float,
     val maxZoom: Float,
@@ -110,6 +115,7 @@ class CameraController(private val context: Context) {
     private var recording: Recording? = null
     private var rotation = Surface.ROTATION_0
     private var caps: CameraCaps? = null
+    private var boundRatio = -1
 
     /** Последние значения автоматики — для подписи «A ISO 320» и для режима Кельвин. */
     @Volatile private var awbGains: RggbChannelVector? = null
@@ -223,7 +229,8 @@ class CameraController(private val context: Context) {
             .build()
         val cam = p.bindToLifecycle(owner, selector, group)
         camera = cam
-        return readCaps(cam, hasFront, lenses, lens?.id).also { caps = it }
+        boundRatio = s.ratio
+        return readCaps(cam, hasFront, lenses, lensesFor(p, !front), lens?.id).also { caps = it }
     }
 
     private fun <T> ExtendableBuilder<T>.usePhysicalCamera(id: String?) {
@@ -268,14 +275,14 @@ class CameraController(private val context: Context) {
         return focal * 43.27f / hypot(sensor.width, sensor.height)
     }
 
-    /** Размер снимка или видео в текущем формате кадра. */
+    /** Размер снимка или видео в заданном формате кадра. */
     fun outputPixels(ratio: Int): String? {
-        val crop = imageCapture?.resolutionInfo?.cropRect
-        val (first, second) = if (crop != null) {
-            crop.width() to crop.height()
-        } else {
-            videoPixels(ratio) ?: return null
-        }
+        val crop = if (ratio == boundRatio) imageCapture?.resolutionInfo?.cropRect else null
+        val (first, second) = when {
+            crop != null -> crop.width() to crop.height()
+            imageCapture != null -> photoPixels(ratio)
+            else -> videoPixels(ratio)
+        } ?: return null
         val long = maxOf(first, second)
         val short = minOf(first, second)
         return "$long × $short · %.1f МП".format(long * short / 1_000_000f)
@@ -286,6 +293,24 @@ class CameraController(private val context: Context) {
         val info = camera?.cameraInfo ?: return null
         val size = listOf(Quality.FHD, Quality.HD, Quality.SD)
             .firstNotNullOfOrNull { QualitySelector.getResolution(info, it) } ?: return null
+        return cropToRatio(size, ratio)
+    }
+
+    /** Формат, ещё не привязанный к камере: самый большой подходящий размер JPEG, обрезанный под кадр. */
+    private fun photoPixels(ratio: Int): Pair<Int, Int>? {
+        val info = camera?.cameraInfo ?: return null
+        val sizes = Camera2CameraInfo.from(info)
+            .getCameraCharacteristic(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            ?.getOutputSizes(ImageFormat.JPEG) ?: return null
+        val source = if (ratio == ProSettings.RATIO_16_9 || ratio == ProSettings.RATIO_18_9) 16f / 9f else 4f / 3f
+        val size = sizes
+            .filter { abs(maxOf(it.width, it.height).toFloat() / minOf(it.width, it.height) - source) < 0.02f }
+            .ifEmpty { sizes.toList() }
+            .maxByOrNull { it.width * it.height } ?: return null
+        return cropToRatio(size, ratio)
+    }
+
+    private fun cropToRatio(size: Size, ratio: Int): Pair<Int, Int> {
         val (ratioW, ratioH) = ProSettings.ratioSize(ratio)
         val long = maxOf(size.width, size.height)
         val short = minOf(size.width, size.height)
@@ -297,7 +322,13 @@ class CameraController(private val context: Context) {
         camera?.cameraControl?.setZoomRatio(ratio)
     }
 
-    private fun readCaps(cam: Camera, hasFront: Boolean, lenses: List<LensOption>, lensId: String?): CameraCaps {
+    private fun readCaps(
+        cam: Camera,
+        hasFront: Boolean,
+        lenses: List<LensOption>,
+        otherLenses: List<LensOption>,
+        lensId: String?,
+    ): CameraCaps {
         val info = Camera2CameraInfo.from(cam.cameraInfo)
         val isoRange = info.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
         val expRange = info.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
@@ -319,6 +350,7 @@ class CameraController(private val context: Context) {
             hasFlash = cam.cameraInfo.hasFlashUnit(),
             hasFront = hasFront,
             lenses = lenses,
+            otherLenses = otherLenses,
             cameraId = lensId ?: info.cameraId,
             minZoom = cam.cameraInfo.zoomState.value?.minZoomRatio ?: 1f,
             maxZoom = cam.cameraInfo.zoomState.value?.maxZoomRatio ?: 1f,
