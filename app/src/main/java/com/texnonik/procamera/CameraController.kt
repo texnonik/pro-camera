@@ -6,18 +6,21 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
 import android.hardware.camera2.params.ColorSpaceTransform
 import android.hardware.camera2.params.RggbChannelVector
 import android.net.Uri
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Log
 import android.util.Range
+import android.util.Rational
 import android.view.Surface
 import androidx.annotation.OptIn
 import androidx.camera.camera2.interop.Camera2CameraControl
@@ -28,6 +31,7 @@ import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.AspectRatio
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ExtendableBuilder
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
@@ -50,7 +54,6 @@ import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
-import kotlinx.coroutines.delay
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
@@ -78,8 +81,14 @@ data class CameraCaps(
     val maxZoom: Float,
 )
 
-/** Отдельная камера телефона; [factor] — увеличение относительно основной (0.6x, 1x, 2x…). */
-data class LensOption(val cameraId: String, val factor: Float) {
+/**
+ * Отдельная камера телефона; [factor] — увеличение относительно основной (0.6x, 1x, 2x…).
+ * [physicalId] задан, если объектив входит в логическую камеру [cameraId].
+ */
+data class LensOption(val cameraId: String, val factor: Float, val physicalId: String? = null) {
+    val id: String
+        get() = if (physicalId != null) "$cameraId/$physicalId" else cameraId
+
     val label: String
         get() = if (kotlin.math.abs(factor - factor.roundToInt()) < 0.05f) {
             "${factor.roundToInt()}x"
@@ -147,9 +156,10 @@ class CameraController(private val context: Context) {
         val front = (s.front && hasFront) || !hasBack
         val lenses = lensesFor(p, front)
         val wantedId = if (front) s.frontCameraId else s.backCameraId
-        val selector = if (wantedId.isNotEmpty() && lenses.any { it.cameraId == wantedId }) {
+        val lens = lenses.firstOrNull { it.id == wantedId }
+        val selector = if (lens != null) {
             CameraSelector.Builder()
-                .addCameraFilter { infos -> infos.filter { Camera2CameraInfo.from(it).cameraId == wantedId } }
+                .addCameraFilter { infos -> infos.filter { Camera2CameraInfo.from(it).cameraId == lens.cameraId } }
                 .build()
         } else if (front) {
             CameraSelector.DEFAULT_FRONT_CAMERA
@@ -157,17 +167,25 @@ class CameraController(private val context: Context) {
             CameraSelector.DEFAULT_BACK_CAMERA
         }
 
-        val full = s.ratio == ProSettings.RATIO_FULL
-        // Во весь экран: берём 16:9 с сенсора и обрезаем по видоискателю через ViewPort,
+        // Берём ближайший формат сенсора и обрезаем через ViewPort,
         // чтобы снимок совпадал с тем, что видно на экране.
-        val viewPort = if (full) awaitViewPort(previewView) else null
-        val aspect = if (full) AspectRatio.RATIO_16_9 else AspectRatio.RATIO_4_3
+        val (ratioW, ratioH) = ProSettings.ratioSize(s.ratio)
+        val viewPort = ViewPort.Builder(
+            Rational(ratioW, ratioH),
+            previewView.display?.rotation ?: Surface.ROTATION_0,
+        ).build()
+        val aspect = if (s.ratio == ProSettings.RATIO_16_9 || s.ratio == ProSettings.RATIO_18_9) {
+            AspectRatio.RATIO_16_9
+        } else {
+            AspectRatio.RATIO_4_3
+        }
         val resolution = ResolutionSelector.Builder()
             .setAspectRatioStrategy(AspectRatioStrategy(aspect, AspectRatioStrategy.FALLBACK_RULE_AUTO))
             .build()
 
         val previewBuilder = Preview.Builder().setResolutionSelector(resolution)
         Camera2Interop.Extender(previewBuilder).setSessionCaptureCallback(captureCallback)
+        previewBuilder.usePhysicalCamera(lens?.physicalId)
         val preview = previewBuilder.build()
         preview.setSurfaceProvider(previewView.surfaceProvider)
 
@@ -182,10 +200,11 @@ class CameraController(private val context: Context) {
                 )
                 .setAspectRatio(aspect)
                 .build()
-            VideoCapture.withOutput(recorder).also {
-                it.targetRotation = rotation
-                videoCapture = it
-            }
+            VideoCapture.Builder(recorder)
+                .setTargetRotation(rotation)
+                .apply { usePhysicalCamera(lens?.physicalId) }
+                .build()
+                .also { videoCapture = it }
         } else {
             ImageCapture.Builder()
                 .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
@@ -193,54 +212,74 @@ class CameraController(private val context: Context) {
                 .setJpegQuality(ProSettings.JPEG_QUALITY)
                 .setFlashMode(flashMode(s.flash))
                 .setTargetRotation(rotation)
+                .apply { usePhysicalCamera(lens?.physicalId) }
                 .build()
                 .also { imageCapture = it }
         }
         val group = UseCaseGroup.Builder()
             .addUseCase(preview)
             .addUseCase(useCase)
-            .apply { viewPort?.let { setViewPort(it) } }
+            .setViewPort(viewPort)
             .build()
         val cam = p.bindToLifecycle(owner, selector, group)
         camera = cam
-        return readCaps(cam, hasFront, lenses).also { caps = it }
+        return readCaps(cam, hasFront, lenses, lens?.id).also { caps = it }
     }
 
-    private suspend fun awaitViewPort(previewView: PreviewView): ViewPort? {
-        delay(50)
-        repeat(60) {
-            if (previewView.isAttachedToWindow) previewView.viewPort?.let { return it }
-            delay(16)
+    private fun <T> ExtendableBuilder<T>.usePhysicalCamera(id: String?) {
+        if (id != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            Camera2Interop.Extender(this).setPhysicalCameraId(id)
         }
-        return null
     }
 
-    /** Все камеры с нужной стороны, отсортированные по фокусному расстоянию. */
+    /**
+     * Все камеры с нужной стороны, отсортированные по фокусному расстоянию:
+     * открытые системой и физические объективы внутри логических камер.
+     */
     private fun lensesFor(p: ProcessCameraProvider, front: Boolean): List<LensOption> {
+        val manager = context.getSystemService(CameraManager::class.java)
         val facing = if (front) CameraCharacteristics.LENS_FACING_FRONT else CameraCharacteristics.LENS_FACING_BACK
-        val found = p.availableCameraInfos.mapNotNull { info ->
-            val c2 = Camera2CameraInfo.from(info)
-            if (c2.getCameraCharacteristic(CameraCharacteristics.LENS_FACING) != facing) return@mapNotNull null
-            val focal = c2.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
-                ?.firstOrNull() ?: return@mapNotNull null
-            val sensor = c2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
-                ?: return@mapNotNull null
-            // Эквивалентное фокусное расстояние (35 мм), чтобы сравнивать разные сенсоры.
-            c2.cameraId to focal * 43.27f / hypot(sensor.width, sensor.height)
+        val found = mutableListOf<LensOption>()
+        p.availableCameraInfos.forEach { info ->
+            val id = Camera2CameraInfo.from(info).cameraId
+            val chars = manager.getCameraCharacteristics(id)
+            if (chars.get(CameraCharacteristics.LENS_FACING) != facing) return@forEach
+            equivalentFocal(chars)?.let { found += LensOption(id, it) }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                chars.physicalCameraIds.forEach { physicalId ->
+                    runCatching { equivalentFocal(manager.getCameraCharacteristics(physicalId)) }
+                        .getOrNull()
+                        ?.let { found += LensOption(id, it, physicalId) }
+                }
+            }
         }
         if (found.isEmpty()) return emptyList()
-        val main = found.first().second
+        val main = found.first().factor
         return found
-            .map { LensOption(it.first, it.second / main) }
+            .map { it.copy(factor = it.factor / main) }
             .distinctBy { (it.factor * 10).roundToInt() }
             .sortedBy { it.factor }
+    }
+
+    /** Эквивалентное фокусное расстояние (35 мм), чтобы сравнивать разные сенсоры. */
+    private fun equivalentFocal(chars: CameraCharacteristics): Float? {
+        val focal = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull() ?: return null
+        val sensor = chars.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE) ?: return null
+        return focal * 43.27f / hypot(sensor.width, sensor.height)
+    }
+
+    /** Размер снимка или видео в текущем формате кадра. */
+    fun outputPixels(): String? {
+        val crop = (imageCapture?.resolutionInfo ?: videoCapture?.resolutionInfo)?.cropRect ?: return null
+        val megapixels = crop.width() * crop.height() / 1_000_000f
+        return "${maxOf(crop.width(), crop.height())} × ${minOf(crop.width(), crop.height())} · %.1f МП".format(megapixels)
     }
 
     fun setZoom(ratio: Float) {
         camera?.cameraControl?.setZoomRatio(ratio)
     }
 
-    private fun readCaps(cam: Camera, hasFront: Boolean, lenses: List<LensOption>): CameraCaps {
+    private fun readCaps(cam: Camera, hasFront: Boolean, lenses: List<LensOption>, lensId: String?): CameraCaps {
         val info = Camera2CameraInfo.from(cam.cameraInfo)
         val isoRange = info.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
         val expRange = info.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
@@ -262,7 +301,7 @@ class CameraController(private val context: Context) {
             hasFlash = cam.cameraInfo.hasFlashUnit(),
             hasFront = hasFront,
             lenses = lenses,
-            cameraId = info.cameraId,
+            cameraId = lensId ?: info.cameraId,
             minZoom = cam.cameraInfo.zoomState.value?.minZoomRatio ?: 1f,
             maxZoom = cam.cameraInfo.zoomState.value?.maxZoomRatio ?: 1f,
         )

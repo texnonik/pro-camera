@@ -12,6 +12,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -59,6 +60,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -67,8 +69,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -116,6 +118,9 @@ fun CameraScreen(onOpenGallery: () -> Unit) {
     var liveExposure by remember { mutableLongStateOf(0L) }
     var focusPoint by remember { mutableStateOf<Offset?>(null) }
     var zoom by remember { mutableFloatStateOf(1f) }
+    // Спуск удерживается: снимок или видео идут на автонастройках, ручные значения не меняются.
+    var autoOverride by remember { mutableStateOf(false) }
+    var pixelInfo by remember { mutableStateOf<String?>(null) }
 
     fun update(next: ProSettings) {
         settings = next
@@ -140,7 +145,14 @@ fun CameraScreen(onOpenGallery: () -> Unit) {
         controller.apply(settings, videoMode)
     }
 
-    LaunchedEffect(settings, caps) { controller.apply(settings, videoMode) }
+    LaunchedEffect(settings, caps, autoOverride) {
+        controller.apply(if (autoOverride) settings.resetToAuto() else settings, videoMode)
+        if (autoOverride) {
+            val center = Offset(previewView.width / 2f, previewView.height / 2f)
+            controller.focusAt(previewView.meteringPointFactory, center.x, center.y)
+            focusPoint = center
+        }
+    }
     LaunchedEffect(Unit) { lastMedia = MediaRepository.latest(context) }
     LaunchedEffect(focusPoint) {
         if (focusPoint != null) {
@@ -184,10 +196,12 @@ fun CameraScreen(onOpenGallery: () -> Unit) {
                     onFinished = { uri ->
                         isRecording = false
                         recordNanos = 0L
+                        autoOverride = false
                         if (uri != null) refreshLast() else toast("Видео не сохранено")
                     },
                 )
                 isRecording = started
+                if (!started) autoOverride = false
             }
             return
         }
@@ -201,24 +215,28 @@ fun CameraScreen(onOpenGallery: () -> Unit) {
             capturing = true
             controller.takePhoto { uri ->
                 capturing = false
+                autoOverride = false
                 if (uri != null) refreshLast() else toast("Фото не сохранено")
             }
         }
     }
 
+    fun onShutterHold() {
+        if (!isRecording && countdown == 0 && !capturing) autoOverride = true
+    }
+
+    fun onShutterRelease(released: Boolean) {
+        if (released) onShutter() else if (!isRecording) autoOverride = false
+    }
+
     val c = caps
     val manualExposure = CameraController.isManualExposure(settings, c)
     val busy = isRecording || countdown > 0
-    val full = settings.ratio == ProSettings.RATIO_FULL
-    // Поверх видоискателя во весь экран панели полупрозрачные.
-    val barBg = if (full) Color(0x66000000) else Color.Transparent
-
-    val configuration = LocalConfiguration.current
-    val screenRatioLabel = remember(configuration) {
-        val w = minOf(configuration.screenWidthDp, configuration.screenHeightDp).coerceAtLeast(1)
-        val h = maxOf(configuration.screenWidthDp, configuration.screenHeightDp)
-        "${(h * 9f / w).roundToInt()}:9"
-    }
+    // Вытянутые форматы занимают весь телефон, панели лежат поверх них и полупрозрачны.
+    val tall = settings.ratio == ProSettings.RATIO_16_9 || settings.ratio == ProSettings.RATIO_18_9
+    val barBg = if (tall) Color(0x66000000) else Color.Transparent
+    val (ratioW, ratioH) = ProSettings.ratioSize(settings.ratio)
+    val previewAspect = ratioW.toFloat() / ratioH
 
     @Composable
     fun PreviewLayer(modifier: Modifier) {
@@ -252,7 +270,11 @@ fun CameraScreen(onOpenGallery: () -> Unit) {
             .fillMaxSize()
             .background(Color.Black),
     ) {
-        if (full) PreviewLayer(Modifier.fillMaxSize())
+        if (tall) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                PreviewLayer(Modifier.aspectRatio(previewAspect))
+            }
+        }
 
         Column(
             Modifier
@@ -297,12 +319,13 @@ fun CameraScreen(onOpenGallery: () -> Unit) {
                     val values = ProSettings.TIMER_VALUES
                     update(settings.copy(timer = values[(values.indexOf(settings.timer) + 1) % values.size]))
                 }
-                TopText(text = if (full) screenRatioLabel else "4:3", enabled = !busy) {
-                    update(
-                        settings.copy(
-                            ratio = if (full) ProSettings.RATIO_4_3 else ProSettings.RATIO_FULL,
-                        ),
-                    )
+                TopText(
+                    text = ProSettings.RATIO_LABELS[settings.ratio.coerceIn(0, ProSettings.RATIO_LABELS.lastIndex)],
+                    enabled = !busy,
+                    onHold = { pixelInfo = controller.outputPixels() },
+                    onRelease = { pixelInfo = null },
+                ) {
+                    update(settings.copy(ratio = (settings.ratio + 1) % ProSettings.RATIO_LABELS.size))
                 }
                 TopIcon(
                     icon = if (settings.grid) Icons.Filled.GridOn else Icons.Filled.GridOff,
@@ -316,14 +339,24 @@ fun CameraScreen(onOpenGallery: () -> Unit) {
                 }
             }
 
-            // Видоискатель (в режиме «весь экран» он лежит под всеми панелями)
+            // Видоискатель (вытянутые форматы лежат под всеми панелями)
             Box(
                 Modifier
                     .fillMaxWidth()
                     .weight(1f),
                 contentAlignment = Alignment.Center,
             ) {
-                if (!full) PreviewLayer(Modifier.aspectRatio(3f / 4f))
+                if (!tall) PreviewLayer(Modifier.aspectRatio(previewAspect))
+                pixelInfo?.let {
+                    Text(
+                        it,
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .background(PanelBg, RoundedCornerShape(8.dp))
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                    )
+                }
                 if (countdown > 0) {
                     Text(
                         "$countdown",
@@ -463,7 +496,12 @@ fun CameraScreen(onOpenGallery: () -> Unit) {
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     GalleryThumb(lastMedia, enabled = !busy) { onOpenGallery() }
-                    ShutterButton(videoMode = videoMode, recording = isRecording) { onShutter() }
+                    ShutterButton(
+                        videoMode = videoMode,
+                        recording = isRecording,
+                        onHold = { onShutterHold() },
+                        onRelease = { onShutterRelease(it) },
+                    ) { onShutter() }
                     Box(
                         Modifier
                             .size(56.dp)
@@ -517,8 +555,8 @@ private fun LensRow(
     ) {
         if (lensChoices) {
             caps.lenses.forEach { lens ->
-                LensChip(lens.label, selected = lens.cameraId == caps.cameraId, enabled = enabled) {
-                    onLens(lens.cameraId)
+                LensChip(lens.label, selected = lens.id == caps.cameraId, enabled = enabled) {
+                    onLens(lens.id)
                 }
             }
         } else {
@@ -749,8 +787,45 @@ private fun TopIcon(
     }
 }
 
+/** Короткое нажатие и удержание; [onRelease] получает false, если жест отменён. */
 @Composable
-private fun TopText(text: String, enabled: Boolean, onClick: () -> Unit) {
+private fun Modifier.tapOrHold(
+    enabled: Boolean,
+    onHold: () -> Unit,
+    onRelease: (Boolean) -> Unit,
+    onTap: () -> Unit,
+): Modifier {
+    val hold by rememberUpdatedState(onHold)
+    val release by rememberUpdatedState(onRelease)
+    val tap by rememberUpdatedState(onTap)
+    return pointerInput(enabled) {
+        if (!enabled) return@pointerInput
+        var holding = false
+        detectTapGestures(
+            onLongPress = {
+                holding = true
+                hold()
+            },
+            onPress = {
+                val released = tryAwaitRelease()
+                if (holding) {
+                    holding = false
+                    release(released)
+                }
+            },
+            onTap = { tap() },
+        )
+    }
+}
+
+@Composable
+private fun TopText(
+    text: String,
+    enabled: Boolean,
+    onHold: () -> Unit,
+    onRelease: () -> Unit,
+    onClick: () -> Unit,
+) {
     Text(
         text,
         color = if (enabled) Color.White else Color.DarkGray,
@@ -758,7 +833,7 @@ private fun TopText(text: String, enabled: Boolean, onClick: () -> Unit) {
         fontWeight = FontWeight.SemiBold,
         modifier = Modifier
             .clip(RoundedCornerShape(8.dp))
-            .clickable(enabled = enabled, onClick = onClick)
+            .tapOrHold(enabled, onHold, { onRelease() }, onClick)
             .padding(horizontal = 6.dp, vertical = 8.dp),
     )
 }
@@ -780,13 +855,19 @@ private fun AutoButton(allAuto: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-private fun ShutterButton(videoMode: Boolean, recording: Boolean, onClick: () -> Unit) {
+private fun ShutterButton(
+    videoMode: Boolean,
+    recording: Boolean,
+    onHold: () -> Unit,
+    onRelease: (Boolean) -> Unit,
+    onClick: () -> Unit,
+) {
     Box(
         Modifier
             .size(80.dp)
             .clip(CircleShape)
             .border(4.dp, Color.White, CircleShape)
-            .clickable(onClick = onClick),
+            .tapOrHold(true, onHold, onRelease, onClick),
         contentAlignment = Alignment.Center,
     ) {
         when {

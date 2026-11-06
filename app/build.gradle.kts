@@ -12,8 +12,8 @@ android {
         applicationId = "com.texnonik.procamera"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "1.2"
     }
 
     // Постоянный debug-ключ (создаётся в CI при первой сборке), чтобы APK обновлялся поверх старого.

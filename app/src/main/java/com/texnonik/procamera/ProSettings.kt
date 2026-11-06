@@ -39,9 +39,19 @@ data class ProSettings(
         const val FLASH_ON = 2
 
         const val RATIO_4_3 = 0
-        /** Кадр с пропорциями экрана телефона, видоискатель на весь экран. */
-        const val RATIO_FULL = 1
+        const val RATIO_1_1 = 1
+        const val RATIO_16_9 = 2
+        const val RATIO_18_9 = 3
+        val RATIO_LABELS = listOf("4:3", "1:1", "16:9", "18:9")
         const val JPEG_QUALITY = 95
+
+        /** Ширина и высота кадра в портретной ориентации. */
+        fun ratioSize(ratio: Int): Pair<Int, Int> = when (ratio) {
+            RATIO_1_1 -> 1 to 1
+            RATIO_16_9 -> 9 to 16
+            RATIO_18_9 -> 9 to 18
+            else -> 3 to 4
+        }
 
         val ISO_VALUES = listOf(
             50, 64, 80, 100, 125, 160, 200, 250, 320, 400, 500, 640, 800,
