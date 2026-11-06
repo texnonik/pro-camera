@@ -266,21 +266,29 @@ fun CameraScreen(onOpenGallery: () -> Unit) {
     val (ratioW, ratioH) = ProSettings.ratioSize(settings.ratio)
     val previewAspect = ratioW.toFloat() / ratioH
 
-    /** Следующая камера: объективы текущей стороны, затем другая сторона телефона. */
-    fun nextCamera() {
+    /** Следующая задняя камера; если телефон открывает только одну — следующий шаг зума. */
+    fun nextRearCamera() {
         val current = c ?: return
-        val next = current.lenses.getOrNull(current.lenses.indexOfFirst { it.id == current.cameraId } + 1)
-        val other = current.otherLenses.firstOrNull()
-        update(
-            when {
-                next != null && settings.front -> settings.copy(frontCameraId = next.id)
-                next != null -> settings.copy(backCameraId = next.id)
-                other != null && settings.front -> settings.copy(front = false, backCameraId = other.id)
-                other != null -> settings.copy(front = true, frontCameraId = other.id)
-                settings.front -> settings.copy(frontCameraId = current.lenses.firstOrNull()?.id ?: "")
-                else -> settings.copy(backCameraId = current.lenses.firstOrNull()?.id ?: "")
-            },
-        )
+        if (settings.front) {
+            update(settings.copy(front = false))
+            return
+        }
+        val lenses = current.lenses
+        if (lenses.size > 1) {
+            val next = lenses[(lenses.indexOfFirst { it.id == current.cameraId } + 1) % lenses.size]
+            update(settings.copy(backCameraId = next.id))
+            toast("Камера ${next.label}")
+            return
+        }
+        val steps = zoomSteps(current)
+        if (steps.size < 2) {
+            toast("Телефон открывает только одну заднюю камеру")
+            return
+        }
+        val next = steps[(steps.indexOfFirst { abs(zoom - it) < 0.05f } + 1) % steps.size]
+        zoom = next
+        controller.setZoom(next)
+        toast("Телефон открывает одну заднюю камеру. Зум ${LensOption("", next).label}")
     }
 
     @Composable
@@ -408,10 +416,10 @@ fun CameraScreen(onOpenGallery: () -> Unit) {
                 }
                 TopIcon(
                     icon = Icons.Filled.FlipCameraAndroid,
-                    description = "Следующая камера",
+                    description = "Следующая задняя камера",
                     enabled = c != null && !busy,
                     active = false,
-                ) { nextCamera() }
+                ) { nextRearCamera() }
                 AutoButton(allAuto = settings.isAllAuto) {
                     update(settings.resetToAuto())
                     panel = null
@@ -593,6 +601,13 @@ fun CameraScreen(onOpenGallery: () -> Unit) {
     }
 }
 
+private fun zoomSteps(caps: CameraCaps): List<Float> = buildList {
+    if (caps.minZoom < 0.95f) add(caps.minZoom)
+    add(1f)
+    if (caps.maxZoom >= 2f) add(2f)
+    if (caps.maxZoom >= 5f) add(5f)
+}
+
 @Composable
 private fun UpdateDialog(build: Int, onDownload: () -> Unit, onDismiss: () -> Unit) {
     AlertDialog(
@@ -618,12 +633,7 @@ private fun LensRow(
     onZoom: (Float) -> Unit,
 ) {
     val lensChoices = caps.lenses.size > 1
-    val zoomSteps = buildList {
-        if (caps.minZoom < 0.95f) add(caps.minZoom)
-        add(1f)
-        if (caps.maxZoom >= 2f) add(2f)
-        if (caps.maxZoom >= 5f) add(5f)
-    }
+    val zoomSteps = zoomSteps(caps)
     if (!lensChoices && zoomSteps.size < 2) return
 
     Row(

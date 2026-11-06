@@ -14,7 +14,7 @@ android {
         targetSdk = 34
         // Совпадает с номером сборки в теге релиза build-N: по нему приложение ищет обновления.
         versionCode = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
-        versionName = "1.3"
+        versionName = "1.4"
     }
 
     // Постоянный debug-ключ (создаётся в CI при первой сборке), чтобы APK обновлялся поверх старого.

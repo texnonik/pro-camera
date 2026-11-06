@@ -79,8 +79,6 @@ data class CameraCaps(
     val hasFront: Boolean,
     /** Объективы с той же стороны, что и текущая камера (если телефон их открывает). */
     val lenses: List<LensOption>,
-    /** Объективы на другой стороне телефона. */
-    val otherLenses: List<LensOption>,
     val cameraId: String,
     val minZoom: Float,
     val maxZoom: Float,
@@ -230,7 +228,7 @@ class CameraController(private val context: Context) {
         val cam = p.bindToLifecycle(owner, selector, group)
         camera = cam
         boundRatio = s.ratio
-        return readCaps(cam, hasFront, lenses, lensesFor(p, !front), lens?.id).also { caps = it }
+        return readCaps(cam, hasFront, lenses, lens?.id).also { caps = it }
     }
 
     private fun <T> ExtendableBuilder<T>.usePhysicalCamera(id: String?) {
@@ -326,7 +324,6 @@ class CameraController(private val context: Context) {
         cam: Camera,
         hasFront: Boolean,
         lenses: List<LensOption>,
-        otherLenses: List<LensOption>,
         lensId: String?,
     ): CameraCaps {
         val info = Camera2CameraInfo.from(cam.cameraInfo)
@@ -350,7 +347,6 @@ class CameraController(private val context: Context) {
             hasFlash = cam.cameraInfo.hasFlashUnit(),
             hasFront = hasFront,
             lenses = lenses,
-            otherLenses = otherLenses,
             cameraId = lensId ?: info.cameraId,
             minZoom = cam.cameraInfo.zoomState.value?.minZoomRatio ?: 1f,
             maxZoom = cam.cameraInfo.zoomState.value?.maxZoomRatio ?: 1f,
