@@ -15,7 +15,9 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -890,21 +892,31 @@ private fun Modifier.tapOrHold(
     val tap by rememberUpdatedState(onTap)
     return pointerInput(enabled) {
         if (!enabled) return@pointerInput
-        var holding = false
-        detectTapGestures(
-            onLongPress = {
-                holding = true
-                hold()
-            },
-            onPress = {
-                val released = tryAwaitRelease()
-                if (holding) {
-                    holding = false
-                    release(released)
+        awaitEachGesture {
+            awaitFirstDown().consume()
+            var timedOut = true
+            val up = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
+                waitForUpOrCancellation().also { timedOut = false }
+            }
+            if (!timedOut) {
+                if (up != null) {
+                    up.consume()
+                    tap()
                 }
-            },
-            onTap = { tap() },
-        )
+                return@awaitEachGesture
+            }
+            hold()
+            var finished = false
+            try {
+                do {
+                    val event = awaitPointerEvent()
+                    event.changes.forEach { it.consume() }
+                } while (event.changes.any { it.pressed })
+                finished = true
+            } finally {
+                release(finished)
+            }
+        }
     }
 }
 
