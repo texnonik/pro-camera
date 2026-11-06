@@ -268,7 +268,7 @@ fun CameraScreen(onOpenGallery: () -> Unit) {
     val (ratioW, ratioH) = ProSettings.ratioSize(settings.ratio)
     val previewAspect = ratioW.toFloat() / ratioH
 
-    /** Следующая задняя камера; если телефон открывает только одну — следующий шаг зума. */
+    /** Следующая задняя камера. Зум эта кнопка не меняет. */
     fun nextRearCamera() {
         val current = c ?: return
         if (settings.front) {
@@ -279,18 +279,14 @@ fun CameraScreen(onOpenGallery: () -> Unit) {
         if (lenses.size > 1) {
             val next = lenses[(lenses.indexOfFirst { it.id == current.cameraId } + 1) % lenses.size]
             update(settings.copy(backCameraId = next.id))
-            toast("Камера ${next.label}")
+            toast("Камера ${next.title} ${next.label}")
             return
         }
-        val steps = zoomSteps(current)
-        if (steps.size < 2) {
-            toast("Телефон открывает только одну заднюю камеру")
-            return
-        }
-        val next = steps[(steps.indexOfFirst { abs(zoom - it) < 0.05f } + 1) % steps.size]
-        zoom = next
-        controller.setZoom(next)
-        toast("Телефон открывает одну заднюю камеру. Зум ${LensOption("", next).label}")
+        Toast.makeText(
+            context,
+            "Android даёт приложению одну заднюю камеру. ${controller.rearCameraReport()}",
+            Toast.LENGTH_LONG,
+        ).show()
     }
 
     @Composable
@@ -647,7 +643,7 @@ private fun LensRow(
     ) {
         if (lensChoices) {
             caps.lenses.forEach { lens ->
-                LensChip(lens.label, selected = lens.id == caps.cameraId, enabled = enabled) {
+                LensChip(lens.title, selected = lens.id == caps.cameraId, enabled = enabled) {
                     onLens(lens.id)
                 }
             }
